@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Navuli Chat — Server Ping</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: #f0f2f5;
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.card {
+  background: white;
+  border-radius: 16px;
+  padding: 36px 32px;
+  box-shadow: 0 4px 24px rgba(0,0,0,.10);
+  width: 100%;
+  max-width: 480px;
+}
+
+h1 { font-size: 20px; color: #111827; margin-bottom: 4px; }
+.sub { color: #6b7280; font-size: 13px; margin-bottom: 28px; }
+
+/* Status indicator */
+.status-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 24px;
+}
+
+.dot {
+  width: 12px; height: 12px;
+  border-radius: 50%;
+  background: #d1d5db;
+  flex-shrink: 0;
+  transition: background .3s;
+}
+.dot.ok      { background: #22c55e; box-shadow: 0 0 0 3px #dcfce7; }
+.dot.error   { background: #ef4444; box-shadow: 0 0 0 3px #fee2e2; }
+.dot.pinging { background: #f59e0b; box-shadow: 0 0 0 3px #fef3c7; }
+
+.status-text { font-size: 14px; color: #374151; }
+.status-text strong { color: #111827; }
+
+/* Stats grid */
+.stats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 24px;
+}
+
+.stat {
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+.stat-label { font-size: 11px; font-weight: 700; color: #6b7280; text-transform: uppercase; letter-spacing: .5px; }
+.stat-value { font-size: 20px; font-weight: 700; color: #111827; margin-top: 2px; }
+.stat-value.green { color: #16a34a; }
+.stat-value.red   { color: #dc2626; }
+
+/* Controls */
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 20px;
+}
+
+.controls label { font-size: 13px; color: #374151; white-space: nowrap; }
+
+.controls select {
+  padding: 7px 10px;
+  border: 1.5px solid #e5e7eb;
+  border-radius: 8px;
+  font-size: 13px;
+  color: #111827;
+  outline: none;
+  cursor: pointer;
+}
+.controls select:focus { border-color: #6366f1; }
+
+.btn {
+  padding: 8px 18px;
+  border: none;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background .15s;
+  white-space: nowrap;
+}
+.btn-primary { background: #6366f1; color: white; }
+.btn-primary:hover { background: #4f46e5; }
+.btn-primary:disabled { background: #a5b4fc; cursor: not-allowed; }
+.btn-danger  { background: #fee2e2; color: #dc2626; }
+.btn-danger:hover { background: #fecaca; }
+
+/* Log */
+.log-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.log-header span { font-size: 12px; font-weight: 700; color: #6b7280; text-transform: uppercase; letter-spacing: .5px; }
+.log-clear { font-size: 11px; color: #9ca3af; cursor: pointer; }
+.log-clear:hover { color: #ef4444; }
+
+.log {
+  background: #0f172a;
+  border-radius: 10px;
+  padding: 12px 14px;
+  height: 220px;
+  overflow-y: auto;
+  font-family: 'Courier New', monospace;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.log-entry { display: flex; gap: 8px; }
+.log-time  { color: #64748b; flex-shrink: 0; }
+.log-ok    { color: #4ade80; }
+.log-err   { color: #f87171; }
+.log-info  { color: #94a3b8; }
+</style>
+</head>
+<body>
+
+<div class="card">
+  <h1>Server Ping</h1>
+  <p class="sub">Keeps the Navuli Chat server awake on Render's free tier</p>
+
+  <div class="status-row">
+    <div class="dot" id="dot"></div>
+    <div class="status-text" id="status-text">Not started</div>
+  </div>
+
+  <div class="stats">
+    <div class="stat">
+      <div class="stat-label">Pings sent</div>
+      <div class="stat-value" id="stat-sent">0</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Success rate</div>
+      <div class="stat-value" id="stat-rate">—</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Last latency</div>
+      <div class="stat-value" id="stat-latency">—</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Online users</div>
+      <div class="stat-value" id="stat-users">—</div>
+    </div>
+  </div>
+
+  <div class="controls">
+    <label>Every</label>
+    <select id="interval-select">
+      <option value="30000">30 s</option>
+      <option value="60000" selected>1 min</option>
+      <option value="120000">2 min</option>
+      <option value="300000">5 min</option>
+    </select>
+    <button class="btn btn-primary" id="toggle-btn" onclick="toggle()">Start</button>
+    <button class="btn btn-danger" onclick="pingNow()">Ping now</button>
+  </div>
+
+  <div class="log-header">
+    <span>Log</span>
+    <span class="log-clear" onclick="clearLog()">Clear</span>
+  </div>
+  <div class="log" id="log"></div>
+</div>
+
+<script>
+let timer      = null;
+let sent       = 0;
+let ok         = 0;
+let running    = false;
+
+const SERVER_URL = window.location.origin;
+
+function toggle() {
+  if (running) stop(); else start();
+}
+
+function start() {
+  running = true;
+  document.getElementById('toggle-btn').textContent = 'Stop';
+  document.getElementById('toggle-btn').classList.replace('btn-primary', 'btn-danger');
+  document.getElementById('toggle-btn').style.cssText = '';
+  const ms = Number(document.getElementById('interval-select').value);
+  pingNow();
+  timer = setInterval(pingNow, ms);
+  log('info', `Auto-ping started every ${ms / 1000}s`);
+}
+
+function stop() {
+  running = false;
+  clearInterval(timer);
+  timer = null;
+  document.getElementById('toggle-btn').textContent = 'Start';
+  document.getElementById('toggle-btn').className = 'btn btn-primary';
+  setDot('idle');
+  setStatus('Stopped');
+  log('info', 'Auto-ping stopped');
+}
+
+async function pingNow() {
+  setDot('pinging');
+  setStatus('Pinging…');
+  const t0 = Date.now();
+  sent++;
+  updateStats();
+
+  try {
+    const res  = await fetch(`${SERVER_URL}/health`, { cache: 'no-store' });
+    const ms   = Date.now() - t0;
+    const data = await res.json();
+
+    if (res.ok) {
+      ok++;
+      setDot('ok');
+      setStatus(`Online — ${data.connections ?? 0} connection(s), uptime ${fmtUptime(data.uptime)}`);
+      document.getElementById('stat-latency').textContent = `${ms} ms`;
+      document.getElementById('stat-latency').className   = 'stat-value' + (ms < 500 ? ' green' : ' red');
+      document.getElementById('stat-users').textContent   = data.onlineUsers ?? '—';
+      log('ok', `200 OK  ${ms}ms  — connections:${data.connections}  users:${data.onlineUsers}  cf:${data.cfCalls}`);
+    } else {
+      setDot('error');
+      setStatus(`Error ${res.status}`);
+      log('err', `${res.status} ${res.statusText}  ${ms}ms`);
+    }
+  } catch (e) {
+    const ms = Date.now() - t0;
+    setDot('error');
+    setStatus('Unreachable — ' + e.message);
+    log('err', `FAILED  ${ms}ms  ${e.message}`);
+  }
+
+  updateStats();
+}
+
+function updateStats() {
+  document.getElementById('stat-sent').textContent = sent;
+  const rate = sent === 0 ? '—' : Math.round((ok / sent) * 100) + '%';
+  const el   = document.getElementById('stat-rate');
+  el.textContent = rate;
+  el.className   = 'stat-value' + (sent === 0 ? '' : ok === sent ? ' green' : ' red');
+}
+
+function setDot(state) {
+  const d = document.getElementById('dot');
+  d.className = 'dot' + (state === 'ok' ? ' ok' : state === 'error' ? ' error' : state === 'pinging' ? ' pinging' : '');
+}
+
+function setStatus(msg) {
+  document.getElementById('status-text').innerHTML = `<strong>${msg}</strong>`;
+}
+
+function log(type, msg) {
+  const box  = document.getElementById('log');
+  const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  const row  = document.createElement('div');
+  row.className = 'log-entry';
+  row.innerHTML = `<span class="log-time">${time}</span><span class="log-${type}">${esc(msg)}</span>`;
+  box.appendChild(row);
+  box.scrollTop = box.scrollHeight;
+}
+
+function clearLog() {
+  document.getElementById('log').innerHTML = '';
+  log('info', 'Log cleared');
+}
+
+function fmtUptime(s) {
+  if (!s) return '—';
+  s = Math.floor(s);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  return h ? `${h}h ${m}m` : m ? `${m}m ${sec}s` : `${sec}s`;
+}
+
+function esc(str) {
+  return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// Auto-start on load
+start();
+</script>
+</body>
+</html>
