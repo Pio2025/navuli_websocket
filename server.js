@@ -355,6 +355,10 @@ if (CF_BASE) {
 
 // ------------------------------------------------------------------ REST endpoints
 
+app.get("/ping", (_req, res) => {
+    res.json({ message: "pong" });
+});
+
 app.get("/health", (_req, res) => {
     res.json({
         status:      "ok",
