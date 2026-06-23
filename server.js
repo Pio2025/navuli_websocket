@@ -10,13 +10,21 @@ const cors    = require("cors");
 const app    = express();
 const server = http.createServer(app);
 
-const JWT_SECRET = process.env.JWT_SECRET;
-const APP_URL    = process.env.APP_URL || "*";
-const PORT       = process.env.PORT   || 3000;
+const JWT_SECRET   = process.env.JWT_SECRET;
+const APP_URL      = process.env.APP_URL      || "*";
+const PORT         = process.env.PORT         || 3000;
+const CF_APP_ID    = process.env.CF_APP_ID;
+const CF_API_TOKEN = process.env.CF_API_TOKEN;
+const CF_BASE      = CF_APP_ID
+    ? `https://rtc.live.cloudflare.com/v1/apps/${CF_APP_ID}`
+    : null;
 
 if (!JWT_SECRET) {
     console.error("FATAL: JWT_SECRET environment variable is not set.");
     process.exit(1);
+}
+if (!CF_BASE) {
+    console.warn("[NavuliChat] WARNING: CF_APP_ID not set — Cloudflare Calls proxy disabled.");
 }
 
 // Accept wildcard "*" OR a specific origin.
@@ -230,6 +238,30 @@ io.on("connection", (socket) => {
         socket.to(`user:${targetUserId}`).emit("ice_candidate", { candidate });
     });
 
+    // ---- Cloudflare Calls SFU signaling ----
+    // Caller → callee: "I published my tracks to CF, here is my session + track info"
+    socket.on("cf_call_offer", ({ targetUserId, conversationId, callType, callerName, callerPhoto, callerSessionId, tracks }) => {
+        if (!targetUserId || !callerSessionId) return;
+        console.log(`[NavuliChat] cf_call_offer  ${userId} → ${targetUserId} (${callType})`);
+        const payload = { callerId: userId, callerName, callerPhoto, callType, conversationId: conversationId || null, callerSessionId, tracks };
+        socket.to(`user:${targetUserId}`).emit("cf_incoming_call", payload);
+        storePendingCall(targetUserId, payload);
+    });
+
+    // Callee → caller: "I published my tracks to CF, here is my session + track info"
+    socket.on("cf_call_answer", ({ callerId, calleeSessionId, tracks }) => {
+        if (!callerId || !calleeSessionId) return;
+        console.log(`[NavuliChat] cf_call_answer ${userId} → ${callerId}`);
+        clearPendingCall(userId);
+        socket.to(`user:${callerId}`).emit("cf_call_answered", { calleeSessionId, tracks });
+    });
+
+    // Either peer → other: "I added new tracks to my CF session, please pull them"
+    socket.on("cf_tracks_pull", ({ targetUserId, sessionId, tracks }) => {
+        if (!targetUserId || !sessionId) return;
+        socket.to(`user:${targetUserId}`).emit("cf_tracks_pull", { fromUserId: userId, sessionId, tracks });
+    });
+
     // ---- Online status query ----
     socket.on("check_online", (userIds, callback) => {
         if (typeof callback !== "function") return;
@@ -258,6 +290,69 @@ io.on("connection", (socket) => {
     });
 });
 
+// ------------------------------------------------------------------ Cloudflare Calls proxy
+// Browsers call these endpoints; the CF API token stays on the server.
+// All endpoints require a valid JWT in the Authorization: Bearer header.
+
+function requireJwt(req, res, next) {
+    const header = req.headers.authorization || "";
+    const token  = header.startsWith("Bearer ") ? header.slice(7) : null;
+    if (!token) return res.status(401).json({ error: "Unauthorized" });
+    try {
+        req.jwtPayload = jwt.verify(token, JWT_SECRET);
+        next();
+    } catch {
+        res.status(401).json({ error: "Invalid or expired token" });
+    }
+}
+
+async function cfFetch(path, method, body) {
+    const res = await fetch(`${CF_BASE}${path}`, {
+        method,
+        headers: {
+            Authorization:  `Bearer ${CF_API_TOKEN}`,
+            "Content-Type": "application/json",
+        },
+        ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+    });
+    const data = await res.json();
+    return { ok: res.ok, status: res.status, data };
+}
+
+if (CF_BASE) {
+    // Create a new Cloudflare Calls session
+    app.post("/cf-calls/sessions/new", requireJwt, async (req, res) => {
+        const { ok, status, data } = await cfFetch("/sessions/new", "POST", {});
+        res.status(ok ? 200 : status).json(data);
+    });
+
+    // Push local tracks to CF / pull remote tracks into this session
+    app.post("/cf-calls/sessions/:sessionId/tracks/new", requireJwt, async (req, res) => {
+        const { ok, status, data } = await cfFetch(
+            `/sessions/${req.params.sessionId}/tracks/new`, "POST", req.body,
+        );
+        res.status(ok ? 200 : status).json(data);
+    });
+
+    // Renegotiate after adding remote tracks (CF returns a new SDP answer)
+    app.put("/cf-calls/sessions/:sessionId/renegotiate", requireJwt, async (req, res) => {
+        const { ok, status, data } = await cfFetch(
+            `/sessions/${req.params.sessionId}/renegotiate`, "PUT", req.body,
+        );
+        res.status(ok ? 200 : status).json(data);
+    });
+
+    // Close specific tracks
+    app.put("/cf-calls/sessions/:sessionId/tracks/close", requireJwt, async (req, res) => {
+        const { ok, status, data } = await cfFetch(
+            `/sessions/${req.params.sessionId}/tracks/close`, "PUT", req.body,
+        );
+        res.status(ok ? 200 : status).json(data);
+    });
+
+    console.log(`[NavuliChat] Cloudflare Calls proxy enabled (App: ${CF_APP_ID})`);
+}
+
 // ------------------------------------------------------------------ REST endpoints
 
 app.get("/health", (_req, res) => {
@@ -266,6 +361,7 @@ app.get("/health", (_req, res) => {
         connections: io.engine.clientsCount,
         onlineUsers: onlineUsers.size,
         uptime:      process.uptime(),
+        cfCalls:     CF_BASE ? "enabled" : "disabled",
     });
 });
 
