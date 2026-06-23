@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: navuli-chat
+    env: node
+    region: singapore
+    plan: free
+    rootDir: navuli_chat
+    buildCommand: npm install
+    startCommand: node server.js
+    envVars:
+      - key: JWT_SECRET
+        sync: false
+      - key: APP_URL
+        sync: false
+      - key: NODE_ENV
+        value: production
