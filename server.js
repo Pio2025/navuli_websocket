@@ -10,9 +10,10 @@ const cors    = require("cors");
 const app    = express();
 const server = http.createServer(app);
 
-const JWT_SECRET   = process.env.JWT_SECRET;
-const APP_URL      = process.env.APP_URL      || "*";
-const PORT         = process.env.PORT         || 3000;
+const JWT_SECRET       = process.env.JWT_SECRET;
+const APP_URL          = process.env.APP_URL      || "*";
+const APP_API_BASE_URL = process.env.APP_API_BASE_URL || "";
+const PORT             = process.env.PORT         || 3000;
 const CF_APP_ID    = process.env.CF_APP_ID;
 const CF_API_TOKEN = process.env.CF_API_TOKEN;
 const CF_BASE      = CF_APP_ID
@@ -25,6 +26,9 @@ if (!JWT_SECRET) {
 }
 if (!CF_BASE) {
     console.warn("[NavuliChat] WARNING: CF_APP_ID not set — Cloudflare Calls proxy disabled.");
+}
+if (!APP_API_BASE_URL) {
+    console.warn("[NavuliChat] WARNING: APP_API_BASE_URL not set — block enforcement on calls disabled.");
 }
 
 // Accept wildcard "*" OR a specific origin.
@@ -69,6 +73,32 @@ function getPendingCall(userId) {
     if (!c) return null;
     if (c.expiresAt < Date.now()) { pendingCalls.delete(Number(userId)); return null; }
     return c;
+}
+
+// ------------------------------------------------------------------ Block check (asks CodeIgniter)
+
+const blockCache = new Map(); // "a:b" -> { blocked, expiresAt }
+
+async function isBlocked(a, b) {
+    if (!APP_API_BASE_URL) return false; // fail-open if not configured
+    const key = [Number(a), Number(b)].sort((x, y) => x - y).join(":");
+    const hit = blockCache.get(key);
+    if (hit && hit.expiresAt > Date.now()) return hit.blocked;
+
+    try {
+        const res = await fetch(`${APP_API_BASE_URL}/chat/internal/block-check`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "X-Chat-Internal-Secret": JWT_SECRET },
+            body: JSON.stringify({ user_a: a, user_b: b }),
+        });
+        const data = await res.json();
+        const blocked = !!data.blocked;
+        blockCache.set(key, { blocked, expiresAt: Date.now() + 5000 });
+        return blocked;
+    } catch (err) {
+        console.warn(`[NavuliChat] block-check failed for ${key}: ${err.message}`);
+        return false; // fail-open: a transient PHP outage shouldn't break all calling
+    }
 }
 
 function addOnlineUser(userId, socketId) {
@@ -189,6 +219,12 @@ io.on("connection", (socket) => {
         });
     });
 
+    // ---- Message reacted (broadcast to conversation room) ----
+    socket.on("message_reacted", ({ conversationId, messageId, reactions }) => {
+        if (!conversationId || !messageId) return;
+        socket.to(`conv:${conversationId}`).emit("message_reacted", { messageId, reactions });
+    });
+
     // ---- Mark messages as read ----
     socket.on("messages_read", ({ conversationId }) => {
         if (!conversationId) return;
@@ -196,8 +232,13 @@ io.on("connection", (socket) => {
     });
 
     // ---- Call signaling relay ----
-    socket.on("call_request", ({ targetUserId, conversationId, callType, offer, callerName, callerPhoto }) => {
+    socket.on("call_request", async ({ targetUserId, conversationId, callType, offer, callerName, callerPhoto }) => {
         if (!targetUserId || !offer) return;
+        if (await isBlocked(userId, targetUserId)) {
+            console.log(`[NavuliChat] call_request  ${userId} → ${targetUserId} BLOCKED`);
+            socket.emit("call_blocked", {});
+            return;
+        }
         console.log(`[NavuliChat] call_request  ${userId} → ${targetUserId} (${callType}) conv:${conversationId}`);
         const payload = { callerId: userId, callerName, callerPhoto, callType, offer, conversationId: conversationId || null };
         // Emit to currently connected sockets
@@ -240,8 +281,13 @@ io.on("connection", (socket) => {
 
     // ---- Cloudflare Calls SFU signaling ----
     // Caller → callee: "I published my tracks to CF, here is my session + track info"
-    socket.on("cf_call_offer", ({ targetUserId, conversationId, callType, callerName, callerPhoto, callerSessionId, tracks }) => {
+    socket.on("cf_call_offer", async ({ targetUserId, conversationId, callType, callerName, callerPhoto, callerSessionId, tracks }) => {
         if (!targetUserId || !callerSessionId) return;
+        if (await isBlocked(userId, targetUserId)) {
+            console.log(`[NavuliChat] cf_call_offer  ${userId} → ${targetUserId} BLOCKED`);
+            socket.emit("call_blocked", {});
+            return;
+        }
         console.log(`[NavuliChat] cf_call_offer  ${userId} → ${targetUserId} (${callType})`);
         const payload = { callerId: userId, callerName, callerPhoto, callType, conversationId: conversationId || null, callerSessionId, tracks };
         socket.to(`user:${targetUserId}`).emit("cf_incoming_call", payload);

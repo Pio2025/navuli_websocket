@@ -12,6 +12,8 @@ services:
         sync: false
       - key: APP_URL
         sync: false
+      - key: APP_API_BASE_URL
+        sync: false
       - key: CF_APP_ID
         sync: false
       - key: CF_API_TOKEN
