@@ -12,5 +12,9 @@ services:
         sync: false
       - key: APP_URL
         sync: false
+      - key: CF_APP_ID
+        sync: false
+      - key: CF_API_TOKEN
+        sync: false
       - key: NODE_ENV
         value: production
