@@ -254,11 +254,11 @@ io.on("connection", (socket) => {
         socket.to(`user:${callerId}`).emit("call_answered", { answer });
     });
 
-    socket.on("call_decline", ({ callerId }) => {
+    socket.on("call_decline", ({ callerId, reason }) => {
         if (!callerId) return;
-        console.log(`[NavuliChat] call_decline  ${userId} → ${callerId}`);
+        console.log(`[NavuliChat] call_decline  ${userId} → ${callerId}${reason ? "  reason=" + reason : ""}`);
         clearPendingCall(userId);
-        socket.to(`user:${callerId}`).emit("call_declined", {});
+        socket.to(`user:${callerId}`).emit("call_declined", { reason: reason || null });
     });
 
     socket.on("call_end", ({ targetUserId }) => {
