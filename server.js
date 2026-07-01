@@ -179,18 +179,26 @@ io.on("connection", (socket) => {
 
     socket.broadcast.emit("user_status", { userId, status: "online" });
 
-    // Deliver any buffered incoming call that arrived while this user was offline
+    // Deliver any buffered incoming call that arrived while this user was offline,
+    // but only if the user is not already in an active call session.
     const pendingCall = getPendingCall(userId);
     if (pendingCall) {
-        console.log(`[NavuliChat] Delivering buffered call to User ${userId} from User ${pendingCall.callerId}`);
-        socket.emit("incoming_call", {
-            callerId:       pendingCall.callerId,
-            callerName:     pendingCall.callerName,
-            callerPhoto:    pendingCall.callerPhoto,
-            callType:       pendingCall.callType,
-            offer:          pendingCall.offer,
-            conversationId: pendingCall.conversationId || null,
-        });
+        if (isInCall(userId)) {
+            // User is already on a call — auto-decline the buffered call on their behalf.
+            console.log(`[NavuliChat] Dropping buffered call for User ${userId} (already in call) — declining to caller ${pendingCall.callerId}`);
+            clearPendingCall(userId);
+            io.to(`user:${pendingCall.callerId}`).emit("call_declined", { reason: "busy" });
+        } else {
+            console.log(`[NavuliChat] Delivering buffered call to User ${userId} from User ${pendingCall.callerId}`);
+            socket.emit("incoming_call", {
+                callerId:       pendingCall.callerId,
+                callerName:     pendingCall.callerName,
+                callerPhoto:    pendingCall.callerPhoto,
+                callType:       pendingCall.callType,
+                offer:          pendingCall.offer,
+                conversationId: pendingCall.conversationId || null,
+            });
+        }
     }
 
     // ---- Join a conversation room ----
@@ -259,10 +267,18 @@ io.on("connection", (socket) => {
     socket.on("call_request", async ({ targetUserId, conversationId, callType, offer, callerName, callerPhoto }) => {
         if (!targetUserId || !offer) return;
 
-        // Server-side one-call-per-user guard: reject before anything reaches the target.
+        // Reject if the CALLER is already in a call on another tab/window.
         if (isInCall(userId)) {
             console.log(`[NavuliChat] call_request  ${userId} → ${targetUserId} REJECTED: caller already in call`);
             socket.emit("call_already_in_call", {});
+            return;
+        }
+
+        // Reject if the TARGET is already in a call — decline on their behalf so
+        // none of their tabs (including new ones) ever receive the incoming_call event.
+        if (isInCall(targetUserId)) {
+            console.log(`[NavuliChat] call_request  ${userId} → ${targetUserId} REJECTED: target already in call`);
+            socket.emit("call_declined", { reason: "busy" });
             return;
         }
 
@@ -328,6 +344,12 @@ io.on("connection", (socket) => {
         if (isInCall(userId)) {
             console.log(`[NavuliChat] cf_call_offer  ${userId} → ${targetUserId} REJECTED: caller already in call`);
             socket.emit("call_already_in_call", {});
+            return;
+        }
+
+        if (isInCall(targetUserId)) {
+            console.log(`[NavuliChat] cf_call_offer  ${userId} → ${targetUserId} REJECTED: target already in call`);
+            socket.emit("call_declined", { reason: "busy" });
             return;
         }
 
