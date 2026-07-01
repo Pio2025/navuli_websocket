@@ -75,6 +75,30 @@ function getPendingCall(userId) {
     return c;
 }
 
+// Active call registry — server-side enforcement of one-call-per-user-per-device.
+// Tracks users who are currently in (or setting up) a call, keyed by userId.
+// Each entry: { peerId, callType, startedAt }
+// Any tab/window belonging to the same userId shares this server-side state,
+// so a user cannot start a second call from a new tab even though the new tab's
+// JS callState is fresh.
+const activeCallSessions = new Map();
+
+function markInCall(userId, peerId, callType) {
+    activeCallSessions.set(Number(userId), { peerId: Number(peerId), callType, startedAt: Date.now() });
+}
+function clearCallSession(userId) {
+    activeCallSessions.delete(Number(userId));
+}
+function isInCall(userId) {
+    return activeCallSessions.has(Number(userId));
+}
+// Only clears userId's session if their recorded peer matches expectedPeer.
+// Prevents a stale or spoofed decline from clearing the wrong active call.
+function clearCallSessionIfPeer(userId, expectedPeer) {
+    const s = activeCallSessions.get(Number(userId));
+    if (s && s.peerId === Number(expectedPeer)) activeCallSessions.delete(Number(userId));
+}
+
 // ------------------------------------------------------------------ Block check (asks CodeIgniter)
 
 const blockCache = new Map(); // "a:b" -> { blocked, expiresAt }
@@ -234,23 +258,35 @@ io.on("connection", (socket) => {
     // ---- Call signaling relay ----
     socket.on("call_request", async ({ targetUserId, conversationId, callType, offer, callerName, callerPhoto }) => {
         if (!targetUserId || !offer) return;
+
+        // Server-side one-call-per-user guard: reject before anything reaches the target.
+        if (isInCall(userId)) {
+            console.log(`[NavuliChat] call_request  ${userId} → ${targetUserId} REJECTED: caller already in call`);
+            socket.emit("call_already_in_call", {});
+            return;
+        }
+
         if (await isBlocked(userId, targetUserId)) {
             console.log(`[NavuliChat] call_request  ${userId} → ${targetUserId} BLOCKED`);
             socket.emit("call_blocked", {});
             return;
         }
+
+        // Mark caller as occupied (calling) so any other tab is blocked immediately.
+        markInCall(userId, targetUserId, callType || "voice");
+
         console.log(`[NavuliChat] call_request  ${userId} → ${targetUserId} (${callType}) conv:${conversationId}`);
         const payload = { callerId: userId, callerName, callerPhoto, callType, offer, conversationId: conversationId || null };
-        // Emit to currently connected sockets
         socket.to(`user:${targetUserId}`).emit("incoming_call", payload);
-        // Buffer for 30 s in case callee is briefly offline
         storePendingCall(targetUserId, payload);
     });
 
     socket.on("call_answer", ({ callerId, answer }) => {
         if (!callerId || !answer) return;
         console.log(`[NavuliChat] call_answer   ${userId} → ${callerId}`);
-        clearPendingCall(userId);   // call accepted — remove buffer
+        clearPendingCall(userId);
+        // Mark callee as occupied now that they have accepted.
+        markInCall(userId, callerId, activeCallSessions.get(Number(callerId))?.callType || "voice");
         socket.to(`user:${callerId}`).emit("call_answered", { answer });
     });
 
@@ -258,19 +294,24 @@ io.on("connection", (socket) => {
         if (!callerId) return;
         console.log(`[NavuliChat] call_decline  ${userId} → ${callerId}${reason ? "  reason=" + reason : ""}`);
         clearPendingCall(userId);
+        // The caller's call didn't connect — release their session so they can call again.
+        clearCallSessionIfPeer(callerId, userId);
         socket.to(`user:${callerId}`).emit("call_declined", { reason: reason || null });
     });
 
     socket.on("call_end", ({ targetUserId }) => {
         if (!targetUserId) return;
         console.log(`[NavuliChat] call_end      ${userId} → ${targetUserId}`);
+        clearCallSession(userId);
+        clearCallSession(targetUserId);
         socket.to(`user:${targetUserId}`).emit("call_ended", {});
     });
 
     socket.on("call_cancel", ({ targetUserId }) => {
         if (!targetUserId) return;
         console.log(`[NavuliChat] call_cancel   ${userId} → ${targetUserId}`);
-        clearPendingCall(targetUserId); // cancel removes the buffer
+        clearCallSession(userId);           // caller gave up — release their slot
+        clearPendingCall(targetUserId);
         socket.to(`user:${targetUserId}`).emit("call_cancelled", {});
     });
 
@@ -283,11 +324,21 @@ io.on("connection", (socket) => {
     // Caller → callee: "I published my tracks to CF, here is my session + track info"
     socket.on("cf_call_offer", async ({ targetUserId, conversationId, callType, callerName, callerPhoto, callerSessionId, tracks }) => {
         if (!targetUserId || !callerSessionId) return;
+
+        if (isInCall(userId)) {
+            console.log(`[NavuliChat] cf_call_offer  ${userId} → ${targetUserId} REJECTED: caller already in call`);
+            socket.emit("call_already_in_call", {});
+            return;
+        }
+
         if (await isBlocked(userId, targetUserId)) {
             console.log(`[NavuliChat] cf_call_offer  ${userId} → ${targetUserId} BLOCKED`);
             socket.emit("call_blocked", {});
             return;
         }
+
+        markInCall(userId, targetUserId, callType || "voice");
+
         console.log(`[NavuliChat] cf_call_offer  ${userId} → ${targetUserId} (${callType})`);
         const payload = { callerId: userId, callerName, callerPhoto, callType, conversationId: conversationId || null, callerSessionId, tracks };
         socket.to(`user:${targetUserId}`).emit("cf_incoming_call", payload);
@@ -299,6 +350,7 @@ io.on("connection", (socket) => {
         if (!callerId || !calleeSessionId) return;
         console.log(`[NavuliChat] cf_call_answer ${userId} → ${callerId}`);
         clearPendingCall(userId);
+        markInCall(userId, callerId, activeCallSessions.get(Number(callerId))?.callType || "voice");
         socket.to(`user:${callerId}`).emit("cf_call_answered", { calleeSessionId, tracks });
     });
 
@@ -323,6 +375,15 @@ io.on("connection", (socket) => {
         removeOnlineUser(userId, socket.id);
         console.log(`[NavuliChat] User ${userId} disconnected (${socket.id})`);
         if (!isOnline(userId)) {
+            // If the user was in an active call, end it for their peer and release both slots.
+            const callSession = activeCallSessions.get(Number(userId));
+            if (callSession) {
+                console.log(`[NavuliChat] User ${userId} disconnected during call with ${callSession.peerId} — ending call`);
+                clearCallSession(userId);
+                clearCallSession(callSession.peerId);
+                io.to(`user:${callSession.peerId}`).emit("call_ended", {});
+            }
+
             // 15-second grace period before broadcasting offline.
             // If the user reconnects within this window they stay "online".
             const timer = setTimeout(() => {
