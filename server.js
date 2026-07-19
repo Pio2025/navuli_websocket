@@ -3,9 +3,17 @@ require("dotenv").config();
 const path    = require("path");
 const express = require("express");
 const http    = require("http");
+const crypto  = require("crypto");
 const { Server } = require("socket.io");
 const jwt     = require("jsonwebtoken");
 const cors    = require("cors");
+
+function timingSafeEqual(a, b) {
+    const bufA = Buffer.from(String(a));
+    const bufB = Buffer.from(String(b));
+    if (bufA.length !== bufB.length) return false;
+    return crypto.timingSafeEqual(bufA, bufB);
+}
 
 const app    = express();
 const server = http.createServer(app);
@@ -506,6 +514,29 @@ app.post("/dev-token", (req, res) => {
     }
     const token = jwt.sign({ userId }, JWT_SECRET, { expiresIn: "24h" });
     res.json({ token });
+});
+
+// Server-to-server push: PHP calls this after creating a notice/announcement/event/
+// wall post/conduct appeal/activity log entry, to fan it out to already-connected users.
+// Shared-secret auth (same secret + header the reverse call in isBlocked() already uses).
+app.post("/internal/notify", (req, res) => {
+    const secret = req.headers["x-chat-internal-secret"];
+    if (!secret || typeof secret !== "string" || !timingSafeEqual(secret, JWT_SECRET)) {
+        return res.status(401).json({ error: "Unauthorized" });
+    }
+
+    const userIds = Array.isArray(req.body?.userIds) ? req.body.userIds : [];
+    const payload = req.body?.payload && typeof req.body.payload === "object" ? req.body.payload : {};
+
+    let delivered = 0;
+    for (const rawId of userIds) {
+        const id = parseInt(rawId, 10);
+        if (!id || id < 1) continue;
+        io.to(`user:${id}`).emit("notification", payload);
+        delivered++;
+    }
+
+    res.json({ success: true, delivered });
 });
 
 // ------------------------------------------------------------------ Start
